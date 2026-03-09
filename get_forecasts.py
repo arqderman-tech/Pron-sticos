@@ -1,72 +1,119 @@
 import requests
 import pandas as pd
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# Tus aeropuertos originales
+# Tus aeropuertos
 AIRPORTS = {
     "SAEZ": {"lat": -34.82, "lon": -58.53, "usa": False},
     "SBGR": {"lat": -23.43, "lon": -46.47, "usa": False},
-    "KMIA": {"lat": 25.79, "lon": -80.29, "usa": True},
-    "KATL": {"lat": 33.64, "lon": -84.42, "usa": True},
-    "KLGA": {"lat": 40.77, "lon": -73.87, "usa": True}
+    "KMIA": {"lat": 25.79,  "lon": -80.29,  "usa": True},
+    "KATL": {"lat": 33.64,  "lon": -84.42,  "usa": True},
+    "KLGA": {"lat": 40.77,  "lon": -73.87,  "usa": True}
 }
 
-def get_single_model(lat, lon, model):
+def get_forecast(lat, lon, models_list="auto"):
+    """
+    Descarga pronóstico horario de temperatura_2m usando Open-Meteo.
+    models_list puede ser "auto" o una lista como ["gfs", "icon", "ecmwf", "gem", "hrrr"]
+    """
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
-        "latitude": lat, "longitude": lon,
+        "latitude": lat,
+        "longitude": lon,
         "hourly": "temperature_2m",
-        "models": model,
-        "timezone": "UTC", "forecast_days": 3
+        "models": ",".join(models_list) if isinstance(models_list, list) else models_list,
+        "timezone": "UTC",
+        "forecast_days": 3,
+        "past_days": 0  # opcional, por si querés extender
     }
+    
     try:
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code == 200:
-            data = r.json()["hourly"]
-            # El nombre de la clave de temperatura varía según el modelo
-            temp_key = [k for k in data.keys() if "temperature_2m" in k][0]
-            return pd.DataFrame({
-                "pronostico_para": [t.replace("T", " ") for t in data["time"]],
-                f"temp_{model.split('_')[0]}": data[temp_key]
-            })
-    except:
-        pass
-    return None
+        r = requests.get(url, params=params, timeout=12)
+        r.raise_for_status()  # lanza error si no es 200
+        data = r.json()
+        
+        if "hourly" not in data or "time" not in data["hourly"]:
+            print("  Respuesta sin datos horarios")
+            return None
+            
+        df = pd.DataFrame({
+            "time": data["hourly"]["time"],
+            "temperature_2m": data["hourly"]["temperature_2m"],
+        })
+        
+        # Si pediste varios modelos, Open-Meteo devuelve solo temperature_2m combinado
+        # (blend inteligente). Si querés separar por modelo → tendrías que pedir uno por uno.
+        
+        return df
+        
+    except requests.exceptions.RequestException as e:
+        print(f"  Error en API: {e}")
+        return None
+
 
 def main():
     os.makedirs("forecasts", exist_ok=True)
-    ahora_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    ahora_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    hoy = datetime.utcnow().date().isoformat()
     
     for icao, info in AIRPORTS.items():
-        print(f"Procesando {icao}...")
+        print(f"Procesando {icao} ({info['lat']}, {info['lon']})...")
         
-        # Lista de modelos a intentar para este aeropuerto
-        modelos_test = ["ecmwf_ifs04", "gfs_seamless", "icon_seamless", "gem_seamless"]
-        if info["usa"]:
-            modelos_test.append("hrrr_seamless")
+        # Modelos recomendados (más realistas según docs 2026)
+        modelos = ["auto"]  # lo más simple y efectivo (combina lo mejor por ubicación)
         
-        df_base = None
+        # Si querés forzar varios y comparar (más pesado, pero multimodelo explícito)
+        # modelos = ["gfs", "icon", "ecmwf", "gem"]
+        # if info["usa"]:
+        #     modelos.append("hrrr")
         
-        for m in modelos_test:
-            df_model = get_single_model(info["lat"], info["lon"], m)
+        df = None
+        
+        for m in modelos:
+            print(f"  Intentando modelo: {m}")
+            df_model = get_forecast(info["lat"], info["lon"], m)
             if df_model is not None:
-                if df_base is None:
-                    df_base = df_model
+                df_model = df_model.rename(columns={"temperature_2m": f"temp_{m}"})
+                if df is None:
+                    df = df_model
                 else:
-                    df_base = pd.merge(df_base, df_model, on="pronostico_para", how="outer")
+                    # Merge por tiempo exacto (inner para evitar NaN si horarios difieren)
+                    df = pd.merge(df, df_model, on="time", how="outer")
         
-        if df_base is not None:
-            df_base["descarga_utc"] = ahora_utc
+        if df is not None:
+            df["descarga_utc"] = ahora_utc
+            df["aeropuerto"] = icao
+            
             # Reordenar columnas
-            cols = ["descarga_utc", "pronostico_para"] + [c for c in df_base.columns if "temp_" in c]
-            df_base = df_base[cols]
+            cols = ["descarga_utc", "aeropuerto", "time"] + \
+                   [c for c in df.columns if c.startswith("temp_")]
+            df = df[cols]
+            
+            # Convertir time a datetime para mejor manejo
+            df["time"] = pd.to_datetime(df["time"])
             
             filename = f"forecasts/forecast_{icao.lower()}.csv"
-            file_exists = os.path.isfile(filename)
-            df_base.to_csv(filename, mode='a', index=False, header=not file_exists)
-            print(f"✅ {icao} guardado con {len(df_base.columns)-2} modelos.")
+            
+            if os.path.isfile(filename):
+                # Leer existente y evitar duplicados por hora + descarga
+                old = pd.read_csv(filename)
+                old["time"] = pd.to_datetime(old["time"])
+                # Filtrar solo datos de hoy en adelante para no duplicar histórico
+                df_new = df[\~df["time"].isin(old["time"])]
+                if not df_new.empty:
+                    df_new.to_csv(filename, mode='a', header=False, index=False)
+                    print(f"  → Agregadas {len(df_new)} filas nuevas")
+                else:
+                    print("  → No hay datos nuevos")
+            else:
+                df.to_csv(filename, index=False)
+                print(f"  → Archivo creado con {len(df)} filas")
+            
+            print(f"✅ {icao} terminado ({len([c for c in df.columns if 'temp_' in c])} columnas de temp)")
+        else:
+            print(f"❌ {icao} falló (sin datos)")
+
 
 if __name__ == "__main__":
     main()
-    
