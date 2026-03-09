@@ -50,7 +50,7 @@ def main():
     for icao, info in AIRPORTS.items():
         print(f"Procesando {icao} ({info['lat']}, {info['lon']})...")
         
-        modelos = ["auto"]  # o ["gfs", "icon", "ecmwf"] si querés separar
+        modelos = ["auto"]  # lo más simple y efectivo
         
         df = None
         
@@ -79,19 +79,19 @@ def main():
             if os.path.isfile(filename):
                 try:
                     old = pd.read_csv(filename)
-                    old["time"] = pd.to_datetime(old["time"])
-                    # ← Línea corregida: sin backslash antes del \~
-                    df_new = df[\~df["time"].isin(old["time"])]
+                    old["time"] = pd.to_datetime(old["time"], errors='coerce')
+                    old = old.dropna(subset=["time"])  # limpia filas inválidas
+                    df_new = df[\~df["time"].isin(old["time"])]  # ← LÍNEA CORREGIDA
                     if not df_new.empty:
                         df_new.to_csv(filename, mode='a', header=False, index=False)
                         print(f"  → Agregadas {len(df_new)} filas nuevas")
                     else:
                         print("  → No hay datos nuevos")
                 except Exception as e:
-                    print(f"  Error leyendo archivo viejo: {e}")
-                    # Si falla, sobrescribe para no perder el run
+                    print(f"  Error leyendo CSV viejo: {e}")
+                    # En caso de error → sobrescribir para no perder el run
                     df.to_csv(filename, index=False)
-                    print("  → Archivo sobrescrito por error")
+                    print("  → Archivo sobrescrito por error en lectura")
             else:
                 df.to_csv(filename, index=False)
                 print(f"  → Archivo creado con {len(df)} filas")
