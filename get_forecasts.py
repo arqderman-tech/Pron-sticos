@@ -13,54 +13,68 @@ AEROPUERTOS = {
 
 def get_forecast(icao, lat, lon):
     url = "https://api.open-meteo.com/v1/forecast"
-    # 'best_match' selecciona automáticamente los mejores modelos (GFS, ECMWF, ICON, etc.)
+    # Lista de modelos globales validados que no causan el error MultiDomains
+    modelos = [
+        "ecmwf_ifs04",    # Europeo (Líder mundial)
+        "gfs_seamless",   # Americano (Referencia)
+        "icon_seamless",  # Alemán (Muy preciso en el sur)
+        "gem_seamless",   # Canadiense
+        "ukmo_seamless",  # Reino Unido
+        "meteofrance_seamless", # Francés
+        "jma_seamless",   # Japonés
+        "bom_access"      # Australiano (Clave para hemisferio sur)
+    ]
+    
     params = {
         "latitude": lat,
         "longitude": lon,
         "hourly": "temperature_2m",
-        "models": "best_match", 
+        "models": ",".join(modelos),
         "timezone": "UTC",
         "forecast_days": 3
     }
     
     try:
-        r = requests.get(url, params=params, timeout=15)
+        r = requests.get(url, params=params, timeout=20)
         if r.status_code == 200:
             res = r.json()
             hourly = res["hourly"]
             
+            # DataFrame base con los tiempos
             df = pd.DataFrame({"pronostico_para": [t.replace("T", " ") for t in hourly["time"]]})
             
+            # Mapeo dinámico: busca cualquier columna que sea de temperatura
             for key, values in hourly.items():
-                if key != "time":
-                    # Limpiamos el nombre: temperature_2m_ecmwf_ifs04 -> temp_ecmwf
-                    parts = key.replace("temperature_2m_", "temp_").split("_")
-                    col_name = f"{parts[0]}_{parts[1]}"
-                    df[col_name] = values
+                if "temperature_2m" in key:
+                    # Formato: temp_ecmwf, temp_gfs, etc.
+                    nombre_col = key.replace("temperature_2m_", "temp_").split("_")[0:2]
+                    df["_".join(nombre_col)] = values
             
             df["descarga_utc"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
             return df
         else:
-            print(f"❌ Error en {icao}: {r.text}")
+            # Si falla, imprimimos el error exacto para debuguear en el log de GitHub
+            print(f"⚠️ Error {r.status_code} en {icao}: {r.text}")
     except Exception as e:
-        print(f"❌ Fallo en {icao}: {e}")
+        print(f"❌ Fallo crítico en {icao}: {e}")
     return None
 
 def main():
     os.makedirs("forecasts", exist_ok=True)
     for icao, coord in AEROPUERTOS.items():
-        print(f"Buscando modelos para {icao}...")
+        print(f"Extrayendo ensamble para {icao}...")
         df = get_forecast(icao, coord["lat"], coord["lon"])
         
         if df is not None:
-            # Ordenar columnas: descarga, tiempo, y luego los modelos
+            # Reordenar columnas para análisis rápido
             cols = ["descarga_utc", "pronostico_para"] + [c for c in df.columns if "temp_" in c]
             df = df[cols]
             
             filename = f"forecasts/forecast_{icao.lower()}.csv"
             file_exists = os.path.isfile(filename)
+            # Guardado incremental sin pisar datos viejos
             df.to_csv(filename, mode='a', index=False, header=not file_exists)
-            print(f"✅ {icao} guardado. Modelos detectados: {len(df.columns)-2}")
+            print(f"✅ {icao} actualizado. Modelos: {len(df.columns)-2}")
 
 if __name__ == "__main__":
     main()
