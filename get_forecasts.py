@@ -3,78 +3,69 @@ import pandas as pd
 import os
 from datetime import datetime
 
-AEROPUERTOS = {
-    "SAEZ": {"lat": -34.82, "lon": -58.53},
-    "SBGR": {"lat": -23.43, "lon": -46.47},
-    "KMIA": {"lat": 25.79, "lon": -80.29},
-    "KATL": {"lat": 33.64, "lon": -84.42},
-    "KLGA": {"lat": 40.77, "lon": -73.87}
+# Tus aeropuertos originales
+AIRPORTS = {
+    "SAEZ": {"lat": -34.82, "lon": -58.53, "usa": False},
+    "SBGR": {"lat": -23.43, "lon": -46.47, "usa": False},
+    "KMIA": {"lat": 25.79, "lon": -80.29, "usa": True},
+    "KATL": {"lat": 33.64, "lon": -84.42, "usa": True},
+    "KLGA": {"lat": 40.77, "lon": -73.87, "usa": True}
 }
 
-def get_forecast(icao, lat, lon):
+def get_single_model(lat, lon, model):
     url = "https://api.open-meteo.com/v1/forecast"
-    # Lista de modelos globales validados que no causan el error MultiDomains
-    modelos = [
-        "ecmwf_ifs04",    # Europeo (Líder mundial)
-        "gfs_seamless",   # Americano (Referencia)
-        "icon_seamless",  # Alemán (Muy preciso en el sur)
-        "gem_seamless",   # Canadiense
-        "ukmo_seamless",  # Reino Unido
-        "meteofrance_seamless", # Francés
-        "jma_seamless",   # Japonés
-        "bom_access"      # Australiano (Clave para hemisferio sur)
-    ]
-    
     params = {
-        "latitude": lat,
-        "longitude": lon,
+        "latitude": lat, "longitude": lon,
         "hourly": "temperature_2m",
-        "models": ",".join(modelos),
-        "timezone": "UTC",
-        "forecast_days": 3
+        "models": model,
+        "timezone": "UTC", "forecast_days": 3
     }
-    
     try:
-        r = requests.get(url, params=params, timeout=20)
+        r = requests.get(url, params=params, timeout=10)
         if r.status_code == 200:
-            res = r.json()
-            hourly = res["hourly"]
-            
-            # DataFrame base con los tiempos
-            df = pd.DataFrame({"pronostico_para": [t.replace("T", " ") for t in hourly["time"]]})
-            
-            # Mapeo dinámico: busca cualquier columna que sea de temperatura
-            for key, values in hourly.items():
-                if "temperature_2m" in key:
-                    # Formato: temp_ecmwf, temp_gfs, etc.
-                    nombre_col = key.replace("temperature_2m_", "temp_").split("_")[0:2]
-                    df["_".join(nombre_col)] = values
-            
-            df["descarga_utc"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
-            return df
-        else:
-            # Si falla, imprimimos el error exacto para debuguear en el log de GitHub
-            print(f"⚠️ Error {r.status_code} en {icao}: {r.text}")
-    except Exception as e:
-        print(f"❌ Fallo crítico en {icao}: {e}")
+            data = r.json()["hourly"]
+            # El nombre de la clave de temperatura varía según el modelo
+            temp_key = [k for k in data.keys() if "temperature_2m" in k][0]
+            return pd.DataFrame({
+                "pronostico_para": [t.replace("T", " ") for t in data["time"]],
+                f"temp_{model.split('_')[0]}": data[temp_key]
+            })
+    except:
+        pass
     return None
 
 def main():
     os.makedirs("forecasts", exist_ok=True)
-    for icao, coord in AEROPUERTOS.items():
-        print(f"Extrayendo ensamble para {icao}...")
-        df = get_forecast(icao, coord["lat"], coord["lon"])
+    ahora_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    
+    for icao, info in AIRPORTS.items():
+        print(f"Procesando {icao}...")
         
-        if df is not None:
-            # Reordenar columnas para análisis rápido
-            cols = ["descarga_utc", "pronostico_para"] + [c for c in df.columns if "temp_" in c]
-            df = df[cols]
+        # Lista de modelos a intentar para este aeropuerto
+        modelos_test = ["ecmwf_ifs04", "gfs_seamless", "icon_seamless", "gem_seamless"]
+        if info["usa"]:
+            modelos_test.append("hrrr_seamless")
+        
+        df_base = None
+        
+        for m in modelos_test:
+            df_model = get_single_model(info["lat"], info["lon"], m)
+            if df_model is not None:
+                if df_base is None:
+                    df_base = df_model
+                else:
+                    df_base = pd.merge(df_base, df_model, on="pronostico_para", how="outer")
+        
+        if df_base is not None:
+            df_base["descarga_utc"] = ahora_utc
+            # Reordenar columnas
+            cols = ["descarga_utc", "pronostico_para"] + [c for c in df_base.columns if "temp_" in c]
+            df_base = df_base[cols]
             
             filename = f"forecasts/forecast_{icao.lower()}.csv"
             file_exists = os.path.isfile(filename)
-            # Guardado incremental sin pisar datos viejos
-            df.to_csv(filename, mode='a', index=False, header=not file_exists)
-            print(f"✅ {icao} actualizado. Modelos: {len(df.columns)-2}")
+            df_base.to_csv(filename, mode='a', index=False, header=not file_exists)
+            print(f"✅ {icao} guardado con {len(df_base.columns)-2} modelos.")
 
 if __name__ == "__main__":
     main()
