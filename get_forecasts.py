@@ -1,7 +1,7 @@
 import requests
 import pandas as pd
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # Tus aeropuertos
 AIRPORTS = {
@@ -13,24 +13,19 @@ AIRPORTS = {
 }
 
 def get_forecast(lat, lon, models_list="auto"):
-    """
-    Descarga pronóstico horario de temperatura_2m usando Open-Meteo.
-    models_list puede ser "auto" o una lista como ["gfs", "icon", "ecmwf", "gem", "hrrr"]
-    """
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
         "longitude": lon,
         "hourly": "temperature_2m",
-        "models": ",".join(models_list) if isinstance(models_list, list) else models_list,
+        "models": models_list if isinstance(models_list, str) else ",".join(models_list),
         "timezone": "UTC",
-        "forecast_days": 3,
-        "past_days": 0  # opcional, por si querés extender
+        "forecast_days": 3
     }
     
     try:
         r = requests.get(url, params=params, timeout=12)
-        r.raise_for_status()  # lanza error si no es 200
+        r.raise_for_status()
         data = r.json()
         
         if "hourly" not in data or "time" not in data["hourly"]:
@@ -41,13 +36,9 @@ def get_forecast(lat, lon, models_list="auto"):
             "time": data["hourly"]["time"],
             "temperature_2m": data["hourly"]["temperature_2m"],
         })
-        
-        # Si pediste varios modelos, Open-Meteo devuelve solo temperature_2m combinado
-        # (blend inteligente). Si querés separar por modelo → tendrías que pedir uno por uno.
-        
         return df
         
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         print(f"  Error en API: {e}")
         return None
 
@@ -55,64 +46,59 @@ def get_forecast(lat, lon, models_list="auto"):
 def main():
     os.makedirs("forecasts", exist_ok=True)
     ahora_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    hoy = datetime.utcnow().date().isoformat()
     
     for icao, info in AIRPORTS.items():
         print(f"Procesando {icao} ({info['lat']}, {info['lon']})...")
         
-        # Modelos recomendados (más realistas según docs 2026)
-        modelos = ["auto"]  # lo más simple y efectivo (combina lo mejor por ubicación)
-        
-        # Si querés forzar varios y comparar (más pesado, pero multimodelo explícito)
-        # modelos = ["gfs", "icon", "ecmwf", "gem"]
-        # if info["usa"]:
-        #     modelos.append("hrrr")
+        modelos = ["auto"]  # o ["gfs", "icon", "ecmwf"] si querés separar
         
         df = None
         
         for m in modelos:
-            print(f"  Intentando modelo: {m}")
+            print(f"  → {m}")
             df_model = get_forecast(info["lat"], info["lon"], m)
             if df_model is not None:
                 df_model = df_model.rename(columns={"temperature_2m": f"temp_{m}"})
                 if df is None:
                     df = df_model
                 else:
-                    # Merge por tiempo exacto (inner para evitar NaN si horarios difieren)
                     df = pd.merge(df, df_model, on="time", how="outer")
         
         if df is not None:
             df["descarga_utc"] = ahora_utc
             df["aeropuerto"] = icao
             
-            # Reordenar columnas
             cols = ["descarga_utc", "aeropuerto", "time"] + \
                    [c for c in df.columns if c.startswith("temp_")]
             df = df[cols]
             
-            # Convertir time a datetime para mejor manejo
             df["time"] = pd.to_datetime(df["time"])
             
             filename = f"forecasts/forecast_{icao.lower()}.csv"
             
             if os.path.isfile(filename):
-                # Leer existente y evitar duplicados por hora + descarga
-                old = pd.read_csv(filename)
-                old["time"] = pd.to_datetime(old["time"])
-                # Filtrar solo datos de hoy en adelante para no duplicar histórico
-                df_new = df[\~df["time"].isin(old["time"])]
-                if not df_new.empty:
-                    df_new.to_csv(filename, mode='a', header=False, index=False)
-                    print(f"  → Agregadas {len(df_new)} filas nuevas")
-                else:
-                    print("  → No hay datos nuevos")
+                try:
+                    old = pd.read_csv(filename)
+                    old["time"] = pd.to_datetime(old["time"])
+                    # ← Línea corregida: sin backslash antes del \~
+                    df_new = df[\~df["time"].isin(old["time"])]
+                    if not df_new.empty:
+                        df_new.to_csv(filename, mode='a', header=False, index=False)
+                        print(f"  → Agregadas {len(df_new)} filas nuevas")
+                    else:
+                        print("  → No hay datos nuevos")
+                except Exception as e:
+                    print(f"  Error leyendo archivo viejo: {e}")
+                    # Si falla, sobrescribe para no perder el run
+                    df.to_csv(filename, index=False)
+                    print("  → Archivo sobrescrito por error")
             else:
                 df.to_csv(filename, index=False)
                 print(f"  → Archivo creado con {len(df)} filas")
             
-            print(f"✅ {icao} terminado ({len([c for c in df.columns if 'temp_' in c])} columnas de temp)")
+            print(f"✅ {icao} OK")
         else:
-            print(f"❌ {icao} falló (sin datos)")
+            print(f"❌ {icao} sin datos")
 
 
 if __name__ == "__main__":
