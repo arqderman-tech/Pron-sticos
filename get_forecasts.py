@@ -4,7 +4,7 @@ import os
 import pandas as pd
 from datetime import datetime
 
-# --- CONFIGURACIÓN DE CIUDADES (URLs MultiModel) ---
+# --- CONFIGURACIÓN ---
 CITIES = [
     {"name": "SAEZ", "url": "https://www.meteoblue.com/en/weather/forecast/multimodel/ezeiza_argentina_3435038"},
     {"name": "SBGR", "url": "https://www.meteoblue.com/en/weather/forecast/multimodel/guarulhos_brazil_3461786"},
@@ -21,22 +21,21 @@ def scrape_forecast(city_name, url):
         r = requests.get(url, headers=headers, timeout=20)
         html = r.text
         
-        # Extraer tiempos y temperaturas usando la lógica de tu metereo2.py
+        # Buscamos los datos (revisando que el regex coincida con el HTML de Meteoblue)
         times = re.findall(r'data-time="([^"]+)"', html)
         temps = re.findall(r'data-temp="([^"]+)"', html)
         
         if not times or not temps:
+            print(f"⚠️ No se encontraron datos en el HTML para {city_name}")
             return None
 
         ahora_utc = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
         data = []
 
         for t, temp in zip(times, temps):
-            # Parsear el tiempo del pronóstico (YYYYMMDD HHMM)
             f_date = f"{t[:4]}-{t[4:6]}-{t[6:8]}"
             f_hour = f"{t[9:11]}:{t[11:13]}"
             
-            # Calcular lead_time_h (antelación)
             f_dt = datetime.strptime(f"{f_date} {f_hour}", "%Y-%m-%d %H:%M")
             c_dt = datetime.strptime(ahora_utc, "%Y-%m-%d %H:%M")
             lead_h = int((f_dt - c_dt).total_seconds() // 3600)
@@ -55,18 +54,25 @@ def scrape_forecast(city_name, url):
         return None
 
 def main():
-    os.makedirs("forecasts", exist_ok=True)
+    # Asegurar carpeta de salida con ruta absoluta para el runner de GitHub
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    output_dir = os.path.join(base_path, "forecasts")
+    
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"📁 Carpeta creada: {output_dir}")
+    
     for city in CITIES:
         print(f"Procesando {city['name']}...")
         df = scrape_forecast(city['name'], city['url'])
         if df is not None:
-            filename = f"forecasts/forecast_{city['name'].lower()}.csv"
-            # Append sin repetir cabecera
+            filename = os.path.join(output_dir, f"forecast_{city['name'].lower()}.csv")
             if not os.path.exists(filename):
                 df.to_csv(filename, index=False)
             else:
                 df.to_csv(filename, mode='a', header=False, index=False)
-            print(f"✅ Guardados {len(df)} puntos para {city['name']}")
+            print(f"✅ {city['name']}: {len(df)} puntos guardados en {filename}")
 
 if __name__ == "__main__":
     main()
+    
